@@ -2,173 +2,164 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from supabase import create_client
-import re
 
 # --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(page_title="Riftbound Borsa", page_icon="📈", layout="wide")
+st.set_page_config(
+    page_title="Riftbound Borsa AI", 
+    page_icon="📈", 
+    layout="wide"
+)
 
-# Nascondi menu Streamlit
+# Nascondi menu Streamlit per un look pulito
 st.markdown("""<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;}</style>""", unsafe_allow_html=True)
 
+# --- CONNESSIONE SUPABASE ---
 try:
     URL = st.secrets["SUPABASE_URL"]
     KEY = st.secrets["SUPABASE_KEY"]
     supabase = create_client(URL, KEY)
 except:
-    st.error("Configura i Secrets su Streamlit Cloud.")
+    st.error("Configura i Secrets su Streamlit Cloud (SUPABASE_URL e SUPABASE_KEY).")
     st.stop()
 
-# --- FUNZIONI DI SUPPORTO ---
-def get_ct_url_slug(name, set_code, is_sh):
-    """Genera lo slug per il link CardTrader"""
-    clean = re.sub(r'[^a-z0-9\s-]', '', name.lower().replace("'", "-"))
-    slug = clean.replace(" ", "-")
-    while "--" in slug: slug = slug.replace("--", "-")
-    suffix = "-alternate-art" if is_sh else ""
-    return f"https://www.cardtrader.com/en/cards/{slug.strip('-')}{suffix}-{set_code.lower()}"
-
 # --- CARICAMENTO DATI ---
-@st.cache_data(ttl=600)
-def get_all_base_data():
-    # 1. Carte
-    c_res = supabase.table("cards").select("*").execute()
-    df_c = pd.DataFrame(c_res.data)
-    df_c['display_name'] = df_c.apply(lambda r: f"{r['name']} (✨ Showcase)" if r.get('is_showcase') else r['name'], axis=1)
-    
-    # 2. Prezzi (Ultimi 2000 per analisi globale)
-    p_res = supabase.table("card_prices").select("*").order("recorded_at", desc=True).limit(2000).execute()
-    df_p = pd.DataFrame(p_res.data)
-    if not df_p.empty:
-        df_p['recorded_at'] = pd.to_datetime(df_p['recorded_at'])
-    
-    return df_c, df_p
 
-def get_single_card_history(card_id):
+@st.cache_data(ttl=600)
+def get_cards_list():
+    """Recupera l'anagrafica delle carte"""
+    res = supabase.table("cards").select("*").execute()
+    df = pd.DataFrame(res.data)
+    # Crea il nome per il menu a tendina
+    df['display_name'] = df.apply(lambda r: f"{r['name']} (✨ Showcase)" if r.get('is_showcase') else r['name'], axis=1)
+    return df
+
+def get_card_history(card_id):
+    """Recupera lo storico prezzi specifico (ID puntuale)"""
     res = supabase.table("card_prices").select("*").eq("card_id", card_id).order("recorded_at", desc=False).execute()
     df = pd.DataFrame(res.data)
     if not df.empty:
         df['recorded_at'] = pd.to_datetime(df['recorded_at'])
     return df
 
-# --- INIZIALIZZAZIONE ---
-df_cards, df_all_prices = get_all_base_data()
+# --- INTERFACCIA SIDEBAR ---
+df_cards = get_cards_list()
 
-# --- SIDEBAR ---
-st.sidebar.title("📊 Navigazione")
-selected_set = st.sidebar.selectbox("Set:", ["Tutti"] + sorted(list(df_cards['set_code'].unique())))
-filtered_cards = df_cards if selected_set == "Tutti" else df_cards[df_cards['set_code'] == selected_set]
+st.sidebar.title("📊 Analisi Decisionale")
+st.sidebar.divider()
 
-selected_display = st.sidebar.selectbox("Cerca Carta:", sorted(filtered_cards['display_name'].unique()))
-selected_langs = st.sidebar.multiselect("Lingue:", ["EN", "CN"], default=["EN"])
+# Filtro Set
+set_list = ["Tutti"] + sorted(list(df_cards['set_code'].unique()))
+selected_set = st.sidebar.selectbox("Filtra per Set:", set_list)
+
+# Filtro Carte
+if selected_set != "Tutti":
+    available_cards = df_cards[df_cards['set_code'] == selected_set]
+else:
+    available_cards = df_cards
+
+selected_display = st.sidebar.selectbox("Seleziona una carta:", sorted(available_cards['display_name'].unique()))
+
+# Fondamentale: scegliamo una lingua alla volta per confrontare prezzo e media correttamente
+selected_lang = st.sidebar.radio("Mercato di riferimento:", ["EN", "CN"])
 
 if st.sidebar.button("🔄 Aggiorna Database"):
     st.cache_data.clear()
     st.rerun()
 
-# Recupero dati carta
+# Recupero info carta selezionata
 card_info = df_cards[df_cards['display_name'] == selected_display].iloc[0]
 card_id = card_info['card_id']
-df_history = get_single_card_history(card_id)
 
-# --- LAYOUT DASHBOARD ---
-st.title("💹 Riftbound Market Intelligence")
+# --- LAYOUT PRINCIPALE ---
+st.title(f"📊 Borsa: {selected_display}")
+st.caption(f"Supporto Decisionale basato su Media Mobile a 7 giorni (SMA)")
+st.divider()
 
-tab1, tab2, tab3 = st.tabs(["🔍 Dettaglio Carta", "🌍 Analisi Mercato", "🎒 Il mio Portfolio"])
+col_img, col_chart = st.columns([1, 2.5])
 
-# --- TAB 1: DETTAGLIO CARTA ---
-with tab1:
-    col_img, col_chart = st.columns([1, 2.5])
-    with col_img:
-        st.image(card_info['image_url'], width='stretch')
-        # Tasto Acquisto
-        ct_link = get_ct_url_slug(card_info['name'], card_info['set_code'], card_info['is_showcase'])
-        st.link_button("🛒 Comprala su CardTrader", ct_link, use_container_width=True)
-        
-        st.subheader("📝 Specifiche")
-        st.write(f"**Rarità:** {card_info['rarity']} | **Set:** {card_info['set_code']}")
-        if card_info['ability']:
-            with st.expander("Vedi Abilità"):
-                st.write(card_info['ability'])
+# Caricamento storico
+df_history = get_card_history(card_id)
+
+with col_img:
+    # Immagine carta
+    st.image(card_info['image_url'], use_container_width=True)
     
-    with col_chart:
-        if not df_history.empty:
-            plot_df = df_history[df_history['language'].isin(selected_langs)]
-            if not plot_df.empty:
-                last_p = float(plot_df.iloc[-1]['price_low'])
-                delta_val = 0
-                if len(plot_df) > 1:
-                    delta_val = last_p - float(plot_df.iloc[-2]['price_low'])
-                
-                st.metric("Ultimo Prezzo Rilevato", f"{last_p} €", delta=f"{round(delta_val, 2)} €")
-
-                fig = px.line(plot_df, x="recorded_at", y="price_low", color="language",
-                             markers=True, template="plotly_dark",
-                             color_discrete_map={"EN": "#00CC96", "CN": "#EF553B"})
-                fig.update_layout(hovermode="x unified", xaxis_title=None, margin=dict(t=10))
-                st.plotly_chart(fig, width='stretch')
+    # Specifiche
+    st.subheader("📝 Specifiche")
+    st.write(f"**ID:** `{card_id}`")
+    st.write(f"**Rarità:** {card_info['rarity']} | **Set:** {card_info['set_code']}")
+    
+    # --- LOGICA SEGNALE IA ---
+    if not df_history.empty:
+        df_lang = df_history[df_history['language'] == selected_lang]
+        if not df_lang.empty:
+            last_price = float(df_lang.iloc[-1]['price_low'])
+            last_trend = float(df_lang.iloc[-1]['price_trend'])
+            
+            st.subheader("🤖 Segnale IA")
+            # Se il prezzo è più alto del 15% rispetto alla media mobile
+            if last_price > last_trend * 1.15:
+                st.warning(f"⚠️ **SOPRAVALUTATA**\nIl prezzo è del {round(((last_price/last_trend)-1)*100)}% sopra la media. Attendi una discesa.")
+            # Se il prezzo è più basso del 15% rispetto alla media mobile
+            elif last_price < last_trend * 0.85:
+                st.success(f"🔥 **OCCASIONE**\nIl prezzo è del {round((1-(last_price/last_trend))*100)}% sotto la media. Ottimo momento per comprare!")
             else:
-                st.warning("Seleziona una lingua.")
+                st.info("⚖️ **STABILE**\nIl prezzo è in linea con il valore reale della settimana.")
+
+with col_chart:
+    if not df_history.empty:
+        df_plot = df_history[df_history['language'] == selected_lang].copy()
+        
+        if not df_plot.empty:
+            # Creazione del grafico con due linee
+            # Trasformiamo i dati per avere una riga per ogni punto di ogni linea (Melt)
+            df_melted = df_plot.melt(
+                id_vars=['recorded_at'], 
+                value_vars=['price_low', 'price_trend'],
+                var_name='Tipo', value_name='Euro'
+            )
+            
+            # Rinominiamo i tipi per la legenda
+            df_melted['Tipo'] = df_melted['Tipo'].map({
+                'price_low': 'Prezzo di Mercato',
+                'price_trend': 'Media Mobile (Trend 7gg)'
+            })
+
+            fig = px.line(
+                df_melted, 
+                x="recorded_at", 
+                y="Prezzo (Euro)", 
+                color="Tipo",
+                markers=True,
+                labels={"recorded_at": "Data", "Prezzo (Euro)": "Prezzo (€)"},
+                template="plotly_dark",
+                color_discrete_map={
+                    'Prezzo di Mercato': "#00CC96",      # Verde
+                    'Media Mobile (Trend 7gg)': "#FFA15A" # Arancione
+                }
+            )
+            
+            fig.update_layout(
+                hovermode="x unified",
+                xaxis_title=None,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Metrica di confronto
+            st.metric(
+                label=f"Ultimo Prezzo ({selected_lang})", 
+                value=f"{last_price} €", 
+                delta=f"{round(last_price - last_trend, 2)} € rispetto alla media"
+            )
+
+            # Storico record
+            with st.expander("📄 Visualizza tutti i record"):
+                st.dataframe(df_plot.sort_values('recorded_at', ascending=False), use_container_width=True, hide_index=True)
         else:
-            st.error("Storico non trovato per questa carta.")
-
-# --- TAB 2: ANALISI MERCATO ---
-with tab2:
-    st.header("🌍 Panoramica Origins & Spiritforged")
-    
-    if not df_all_prices.empty:
-        # 1. Calcolo Valore Totale Set (Solo EN)
-        latest_market = df_all_prices[df_all_prices['language'] == 'EN'].sort_values('recorded_at').groupby('card_id').last().reset_index()
-        total_set_value = latest_market['price_low'].sum()
-        
-        # 2. Calcolo Gainers/Losers (confronto ultimi 2 giorni)
-        movers_list = []
-        for cid in latest_market['card_id'].unique():
-            history = df_all_prices[(df_all_prices['card_id'] == cid) & (df_all_prices['language'] == 'EN')].sort_values('recorded_at', ascending=False)
-            if len(history) >= 2:
-                curr = float(history.iloc[0]['price_low'])
-                prev = float(history.iloc[1]['price_low'])
-                if prev > 0:
-                    pct = round(((curr - prev) / prev) * 100, 2)
-                    name = df_cards[df_cards['card_id'] == cid]['name'].values[0]
-                    movers_list.append({'Carta': name, 'Variazione': pct, 'Prezzo': curr})
-        
-        df_movers = pd.DataFrame(movers_list)
-
-        # UI Stats
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Valore Totale Set (1x)", f"{round(total_set_value, 2)} €")
-        
-        if not df_movers.empty:
-            with st.container():
-                col_g, col_l = st.columns(2)
-                with col_g:
-                    st.success("📈 Top Gainers (EN)")
-                    st.dataframe(df_movers.sort_values('Variazione', ascending=False).head(5), hide_index=True, width='stretch')
-                with col_l:
-                    st.error("📉 Top Losers (EN)")
-                    st.dataframe(df_movers.sort_values('Variazione', ascending=True).head(5), hide_index=True, width='stretch')
+            st.warning(f"Nessun dato registrato per il mercato {selected_lang}.")
     else:
-        st.info("Attendi che lo scraper accumuli più dati per l'analisi dei trend.")
-
-# --- TAB 3: PORTFOLIO ---
-with tab3:
-    st.header("🎒 Il mio Raccoglitore")
-    st.write("Gestisci le tue carte e monitora il valore del tuo investimento.")
-    
-    col_p1, col_p2 = st.columns(2)
-    with col_p1:
-        qty = st.number_input(f"Quante copie hai di '{selected_display}'?", min_value=0, step=1)
-        buy_price = st.number_input("Prezzo medio di acquisto (€)", min_value=0.0)
-    
-    if qty > 0 and not df_history.empty:
-        current_p = float(df_history.iloc[-1]['price_low'])
-        invested = qty * buy_price
-        current_val = qty * current_p
-        profit = current_val - invested
-        
-        with col_p2:
-            st.metric("Valore Attuale", f"{round(current_val, 2)} €", delta=f"{round(profit, 2)} € Profitto")
-            st.progress(min(max(current_val / (invested if invested > 0 else 1), 0.0), 1.0), text="Rendimento rispetto all'acquisto")
+        st.info("Esegui lo scraper per generare i primi dati.")
 
 st.divider()
-st.caption("Riftbound Card Market Dashboard | Real-time prices via Scraper Bot")
+st.caption("Riftbound Intelligence Dashboard • Dati analizzati in tempo reale")
