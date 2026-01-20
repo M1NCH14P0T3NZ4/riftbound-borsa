@@ -3,11 +3,12 @@ import pandas as pd
 import plotly.express as px
 from supabase import create_client
 import re
+import datetime
 
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="Riftbound Market Intelligence", page_icon="📈", layout="wide")
 
-# Nascondi menu Streamlit
+# Nascondi stile Streamlit standard
 st.markdown("""<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;}</style>""", unsafe_allow_html=True)
 
 # --- CONNESSIONE SUPABASE ---
@@ -16,204 +17,212 @@ try:
     KEY = st.secrets["SUPABASE_KEY"]
     supabase = create_client(URL, KEY)
 except:
-    st.error("Errore: Secrets non configurati su Streamlit Cloud.")
+    st.error("Configura i Secrets su Streamlit Cloud (SUPABASE_URL e SUPABASE_KEY).")
     st.stop()
 
-# --- GESTIONE SESSIONE AUTENTICAZIONE ---
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "user_email" not in st.session_state:
-    st.session_state.user_email = ""
-if "user_id" not in st.session_state:
-    st.session_state.user_id = None
+# --- GESTIONE SESSIONE ---
+if "user" not in st.session_state:
+    st.session_state.user = None
 
 def login_user(email, password):
     try:
         res = supabase.auth.sign_in_with_password({"email": email, "password": password})
-        st.session_state.logged_in = True
-        st.session_state.user_email = res.user.email
-        st.session_state.user_id = res.user.id
-        st.success("Accesso eseguito!")
+        st.session_state.user = res.user
         st.rerun()
-    except Exception as e:
-        st.error("Credenziali non valide o utente non trovato.")
+    except:
+        st.error("Credenziali errate o utente non trovato.")
 
 def signup_user(email, password):
     try:
         supabase.auth.sign_up({"email": email, "password": password})
-        st.info("Registrazione inviata! Controlla la tua email per confermare (se richiesto) e riprova il login.")
+        st.info("Registrazione inviata! Se non riesci ad accedere, controlla se hai ricevuto una mail di conferma.")
     except Exception as e:
-        st.error(f"Errore registrazione: {e}")
+        st.error(f"Errore: {e}")
 
 def logout_user():
     supabase.auth.sign_out()
-    st.session_state.logged_in = False
-    st.session_state.user_email = ""
-    st.session_state.user_id = None
+    st.session_state.user = None
     st.rerun()
 
-# --- SCHERMATA DI AUTENTICAZIONE (Se non loggato) ---
-if not st.session_state.logged_in:
-    st.title("🛡️ Riftbound Borsa - Accesso Riservato")
-    st.markdown("Benvenuto nella piattaforma di analisi avanzata per Riftbound. Effettua l'accesso per consultare i prezzi e gestire la tua collezione.")
+# --- 1. SCHERMATA DI ACCESSO (AUTH WALL) ---
+if st.session_state.user is None:
+    st.title("🛡️ Riftbound Intelligence - Accesso")
+    st.write("Accedi per consultare i trend di mercato e gestire il tuo portfolio criptato.")
     
-    col_auth1, col_auth2 = st.columns(2)
-    
-    with col_auth1:
-        st.subheader("Login")
-        l_email = st.text_input("Email", key="login_email")
-        l_pwd = st.text_input("Password", type="password", key="login_pwd")
+    tab_l, tab_s = st.tabs(["Login", "Crea Account"])
+    with tab_l:
+        email = st.text_input("Email")
+        pwd = st.text_input("Password", type="password")
         if st.button("Accedi"):
-            login_user(l_email, l_pwd)
-            
-    with col_auth2:
-        st.subheader("Nuovo Utente")
-        s_email = st.text_input("Email", key="signup_email")
-        s_pwd = st.text_input("Password", type="password", key="signup_pwd")
-        if st.button("Crea Account"):
-            signup_user(s_email, s_pwd)
-    st.stop() # Blocca l'esecuzione qui finché non sono loggato
+            login_user(email, pwd)
+    with tab_s:
+        n_email = st.text_input("Nuova Email")
+        n_pwd = st.text_input("Nuova Password", type="password")
+        if st.button("Registrati"):
+            signup_user(n_email, n_pwd)
+    st.stop()
 
-# --- DA QUI IN POI IL CODICE VIENE ESEGUITO SOLO SE LOGGATI ---
+# --- DA QUI IN POI L'UTENTE È LOGGATO ---
 
 # --- CARICAMENTO DATI ---
 @st.cache_data(ttl=600)
-def get_all_base_data():
+def get_base_data():
+    # Carica anagrafica carte
     c_res = supabase.table("cards").select("*").execute()
     df_c = pd.DataFrame(c_res.data)
     df_c['display_name'] = df_c.apply(lambda r: f"{r['name']} (✨ Showcase)" if r.get('is_showcase') else r['name'], axis=1)
+    
+    # Carica prezzi per i trend (ultimi 2000 record)
     p_res = supabase.table("card_prices").select("*").order("recorded_at", desc=True).limit(2000).execute()
     df_p = pd.DataFrame(p_res.data)
     if not df_p.empty:
         df_p['recorded_at'] = pd.to_datetime(df_p['recorded_at'])
+    
     return df_c, df_p
 
-def get_card_history(card_id):
+def get_history(card_id):
     res = supabase.table("card_prices").select("*").eq("card_id", card_id).order("recorded_at", desc=False).execute()
     df = pd.DataFrame(res.data)
     if not df.empty:
         df['recorded_at'] = pd.to_datetime(df['recorded_at'])
     return df
 
-df_cards, df_all_prices = get_all_base_data()
+df_cards, df_all_prices = get_base_data()
 
-# --- SIDEBAR (LOGGATO) ---
+# --- SIDEBAR NAVIGAZIONE ---
 with st.sidebar:
-    st.success(f"Loggato come: \n{st.session_state.user_email}")
-    if st.button("Esci (Logout)"):
-        logout_user()
+    st.title("👤 Account")
+    st.write(f"Email: `{st.session_state.user.email}`")
+    if st.button("Esci dal sistema"): logout_user()
     st.divider()
+    
     st.header("🔍 Navigazione")
-    selected_set = st.sidebar.selectbox("Filtra per Set:", ["Tutti"] + sorted(list(df_cards['set_code'].unique())))
+    selected_set = st.selectbox("Filtra Set:", ["Tutti"] + sorted(list(df_cards['set_code'].unique())))
     f_cards = df_cards if selected_set == "Tutti" else df_cards[df_cards['set_code'] == selected_set]
-    selected_display = st.sidebar.selectbox("Scegli Carta:", sorted(f_cards['display_name'].unique()))
-    selected_lang = st.sidebar.radio("Mercato:", ["EN", "CN"])
-    if st.sidebar.button("🔄 Aggiorna Database"):
+    
+    selected_display = st.selectbox("Cerca Carta:", sorted(f_cards['display_name'].unique()))
+    selected_lang = st.radio("Mercato:", ["EN", "CN"])
+    
+    if st.button("🔄 Aggiorna Database"):
         st.cache_data.clear()
         st.rerun()
 
 # Recupero info carta selezionata
 card_info = df_cards[df_cards['display_name'] == selected_display].iloc[0]
 card_id = card_info['card_id']
-df_history = get_card_history(card_id)
 
-# --- LAYOUT PRINCIPALE CON TABS ---
+# --- LAYOUT PRINCIPALE ---
 st.title("💹 Riftbound Market Intelligence")
-tab1, tab2, tab3 = st.tabs(["🔍 Dettaglio & IA", "🌍 Analisi Mercato", "🎒 La mia Collezione"])
+t1, t2, t3 = st.tabs(["🔍 Dettaglio & IA", "🌍 Analisi Mercato", "🎒 La mia Collezione"])
 
-# --- TAB 1: DETTAGLIO CARTA & IA ---
-with tab1:
+# --- TAB 1: DETTAGLIO & IA ---
+with t1:
     col_img, col_chart = st.columns([1, 2.5])
+    df_history = get_history(card_id)
+    df_lang = df_history[df_history['language'] == selected_lang] if not df_history.empty else pd.DataFrame()
+
     with col_img:
-        st.image(card_info['image_url'], use_container_width=True)
-        st.subheader("📝 Info")
-        st.write(f"**ID:** `{card_id}` | **Rarità:** {card_info['rarity']}")
-        if card_info['ability']:
-            with st.expander("Vedi Abilità"): st.write(card_info['ability'])
+        st.image(card_info['image_url'], width='stretch')
+        st.subheader("📝 Specifiche")
+        st.write(f"ID: `{card_id}` | Rarità: {card_info['rarity']}")
         
-        # LOGICA SEGNALE IA
-        df_lang = df_history[df_history['language'] == selected_lang]
         if not df_lang.empty:
-            last_p = float(df_lang.iloc[-1]['price_low'])
-            last_t = float(df_lang.iloc[-1]['price_trend'])
+            lp = float(df_lang.iloc[-1]['price_low'])
+            lt = float(df_lang.iloc[-1]['price_trend'])
             st.subheader("🤖 Segnale IA")
-            if last_p > last_t * 1.15: st.warning(f"⚠️ SOPRAVALUTATA (+{round(((last_p/last_t)-1)*100)}%)")
-            elif last_p < last_t * 0.85: st.success(f"🔥 OCCASIONE (-{round((1-(last_p/last_t))*100)}%)")
+            if lp > lt * 1.15: st.warning(f"⚠️ SOPRAVALUTATA (+{round(((lp/lt)-1)*100)}%)")
+            elif lp < lt * 0.85: st.success(f"🔥 OCCASIONE (-{round((1-(lp/lt))*100)}%)")
             else: st.info("⚖️ MERCATO STABILE")
 
     with col_chart:
         if not df_lang.empty:
-            temp_df = df_lang[['recorded_at', 'price_low', 'price_trend']].copy()
-            df_melted = temp_df.melt(id_vars=['recorded_at'], value_vars=['price_low', 'price_trend'],
-                                     var_name='Legenda', value_name='Prezzo')
-            df_melted['Legenda'] = df_melted['Legenda'].map({'price_low': 'Prezzo Real', 'price_trend': 'Media Mobile (7g)'})
-
-            fig = px.line(df_melted, x="recorded_at", y="Prezzo", color="Legenda",
-                         markers=True, template="plotly_dark",
-                         color_discrete_map={'Prezzo Real': "#00CC96", 'Media Mobile (7g)': "#FFA15A"})
-            fig.update_layout(hovermode="x unified", xaxis_title=None)
-            st.plotly_chart(fig, use_container_width=True)
-            st.metric("Ultimo Rilevamento", f"{last_p} €", f"{round(last_p - last_t, 2)} € vs Media")
+            # Grafico Doppio (Prezzo vs Media Mobile)
+            temp = df_lang[['recorded_at', 'price_low', 'price_trend']].copy()
+            melted = temp.melt(id_vars=['recorded_at'], value_vars=['price_low', 'price_trend'], var_name='Tipo', value_name='Prezzo')
+            melted['Tipo'] = melted['Tipo'].map({'price_low': 'Prezzo Reale', 'price_trend': 'Trend (SMA 7g)'})
+            
+            fig = px.line(melted, x="recorded_at", y="Prezzo", color="Tipo", markers=True, template="plotly_dark",
+                         color_discrete_map={'Prezzo Reale': "#00CC96", 'Trend (SMA 7g)': "#FFA15A"})
+            fig.update_layout(hovermode="x unified", xaxis_title=None, margin=dict(t=0))
+            st.plotly_chart(fig, width='stretch')
+            st.metric("Valore Attuale", f"{lp} €", f"{round(lp-lt, 2)} € vs Media")
         else:
-            st.warning("Nessun dato per questa lingua.")
+            st.info("Nessun dato per questo mercato. Avvia lo scraper.")
 
 # --- TAB 2: ANALISI MERCATO ---
-with tab2:
-    st.header("🌍 Panoramica Origins & Spiritforged")
+with t2:
+    st.header("🌍 Trend Globali (EN)")
     if not df_all_prices.empty:
         df_en = df_all_prices[df_all_prices['language'] == 'EN'].copy()
-        latest_market = df_en.sort_values('recorded_at').groupby('card_id').last().reset_index()
-        total_val = latest_market['price_low'].sum()
+        latest = df_en.sort_values('recorded_at').groupby('card_id').last().reset_index()
         
-        st.metric("Valore Totale Set (1x EN)", f"{round(total_val, 2)} €")
-        
-        # Calcolo Gainers/Losers
+        # Calcolo Movers
         movers = []
-        for cid in latest_market['card_id'].unique():
+        for cid in latest['card_id'].unique():
             h = df_en[df_en['card_id'] == cid].sort_values('recorded_at', ascending=False)
             if len(h) >= 2:
-                curr, prev = float(h.iloc[0]['price_low']), float(h.iloc[1]['price_low'])
-                if prev > 0:
+                c, p = float(h.iloc[0]['price_low']), float(h.iloc[1]['price_low'])
+                if p > 0:
                     movers.append({'Carta': df_cards[df_cards['card_id']==cid]['name'].values[0], 
-                                   'Var %': round(((curr-prev)/prev)*100, 2), 'Prezzo': curr})
+                                   'Variazione %': round(((c-p)/p)*100, 2), 'Prezzo': c})
         df_m = pd.DataFrame(movers)
-        cg, cl = st.columns(2)
-        with cg:
-            st.success("📈 Top Gainers (24h)")
-            st.dataframe(df_m.sort_values('Var %', ascending=False).head(5), hide_index=True, use_container_width=True)
-        with cl:
-            st.error("📉 Top Losers (24h)")
-            st.dataframe(df_m.sort_values('Var %', ascending=True).head(5), hide_index=True, use_container_width=True)
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.success("📈 Top Gainers")
+            st.dataframe(df_m.sort_values('Variazione %', ascending=False).head(5), hide_index=True, width='stretch')
+        with c2:
+            st.error("📉 Top Losers")
+            st.dataframe(df_m.sort_values('Variazione %', ascending=True).head(5), hide_index=True, width='stretch')
 
-# --- TAB 3: LA MIA COLLEZIONE (DATABASE PRIVATO) ---
-with tab3:
-    st.header(f"🎒 Raccoglitore di {st.session_state.user_email}")
-    st.write("Aggiungi carte per monitorare il valore del tuo patrimonio personale.")
+# --- TAB 3: LA MIA COLLEZIONE ---
+with t3:
+    st.header("🎒 Gestione Raccoglitore")
     
-    col_port1, col_port2 = st.columns(2)
-    with col_port1:
-        st.write(f"Stai aggiungendo: **{selected_display}**")
-        qty = st.number_input("Quantità posseduta", min_value=0, step=1, key="col_qty")
-        buy_p = st.number_input("Prezzo di acquisto unitario (€)", min_value=0.0, key="col_price")
-        if st.button("Salva nel Portfolio"):
-            supabase.table("user_collections").upsert({
-                "user_id": st.session_state.user_id,
-                "card_id": card_id,
-                "quantity": qty,
-                "purchase_price": buy_p
-            }).execute()
-            st.toast(f"Salvato: {card_info['name']}!", icon="✅")
+    # 1. Importazione Massiva via TXT
+    with st.expander("📥 Importazione Rapida (Copia-Incolla)", expanded=False):
+        st.write("Incolla un elenco di nomi (uno per riga). Verranno aggiunte come quantità 1 (EN).")
+        bulk_input = st.text_area("Lista nomi carte:", height=150, placeholder="Darius, Trifarian\nAcceptable Losses...")
+        if st.button("Esegui Importazione"):
+            names = [n.strip() for n in bulk_input.split("\n") if n.strip()]
+            count = 0
+            for n in names:
+                match = df_cards[df_cards['name'].str.lower() == n.lower()]
+                if not match.empty:
+                    # Prende la versione non-showcase per default
+                    target_id = match[match['is_showcase'] == False].iloc[0]['card_id'] if not match[match['is_showcase'] == False].empty else match.iloc[0]['card_id']
+                    supabase.table("user_collections").upsert({
+                        "user_id": st.session_state.user.id, "card_id": target_id, "quantity": 1
+                    }).execute()
+                    count += 1
+            st.success(f"Aggiunte {count} carte al tuo portfolio!")
+            st.rerun()
 
-    with col_port2:
-        st.subheader("La tua collezione")
-        my_coll = supabase.table("user_collections").select("*, cards(name)").execute().data
-        if my_coll:
-            df_my = pd.DataFrame(my_coll)
-            # Mostriamo una versione semplificata
-            df_my['Nome Carta'] = df_my['cards'].apply(lambda x: x['name'])
-            st.dataframe(df_my[['Nome Carta', 'quantity', 'purchase_price']], use_container_width=True, hide_index=True)
-        else:
-            st.info("Il tuo raccoglitore è ancora vuoto.")
+    # 2. Modifica Singola
+    st.subheader(f"Modifica: {selected_display}")
+    c_qty = st.number_input("Quantità posseduta", min_value=0, step=1)
+    c_buy = st.number_input("Prezzo acquisto unitario (€)", min_value=0.0)
+    if st.button("💾 Salva nel Raccoglitore"):
+        supabase.table("user_collections").upsert({
+            "user_id": st.session_state.user.id, "card_id": card_id, "quantity": c_qty, "purchase_price": c_buy
+        }).execute()
+        st.toast("Salvato!")
+        st.rerun()
+
+    # 3. Visualizzazione Portfolio
+    st.divider()
+    my_data = supabase.table("user_collections").select("*, cards(name, rarity)").eq("user_id", st.session_state.user.id).execute().data
+    if my_data:
+        df_my = pd.DataFrame(my_data)
+        df_my['Nome'] = df_my['cards'].apply(lambda x: x['name'])
+        df_my['Rarità'] = df_my['cards'].apply(lambda x: x['rarity'])
+        
+        # Calcolo valore totale portfolio
+        # (Qui servirebbe una logica per prendere l'ultimo prezzo di ogni carta, per ora mostriamo la tabella)
+        st.subheader("🖼️ Il tuo Portfolio")
+        st.dataframe(df_my[['Nome', 'Rarità', 'quantity', 'purchase_price']], width='stretch', hide_index=True)
+    else:
+        st.info("Il tuo raccoglitore è vuoto.")
 
 st.divider()
-st.caption("Riftbound Borsa v5.0 | Sistema protetto da crittografia SSL")
+st.caption("Riftbound Borsa v5.0 | Dati protetti e privati per ogni utente.")
