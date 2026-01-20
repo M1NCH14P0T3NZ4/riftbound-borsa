@@ -3,153 +3,125 @@ import pandas as pd
 import plotly.express as px
 from supabase import create_client
 
-# --- CONFIGURAZIONE PAGINA ---
+# --- CONFIGURAZIONE ---
 st.set_page_config(page_title="Riftbound Borsa", page_icon="📈", layout="wide")
 
-# --- CONNESSIONE ---
+# Nascondi menu Streamlit per un look più pulito
+st.markdown("""<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;}</style>""", unsafe_allow_html=True)
+
 try:
     URL = st.secrets["SUPABASE_URL"]
     KEY = st.secrets["SUPABASE_KEY"]
     supabase = create_client(URL, KEY)
 except:
-    st.error("Errore Secrets!")
+    st.error("Configura i Secrets su Streamlit Cloud.")
     st.stop()
 
 # --- CARICAMENTO DATI ---
-
 @st.cache_data(ttl=600)
-def get_all_data():
-    # Carichiamo anagrafica
+def load_data():
+    # Carica anagrafica
     c_res = supabase.table("cards").select("*").execute()
     df_c = pd.DataFrame(c_res.data)
     df_c['display_name'] = df_c.apply(lambda r: f"{r['name']} (✨ Showcase)" if r.get('is_showcase') else r['name'], axis=1)
     
-    # Carichiamo TUTTI i prezzi per calcolare i Market Movers (Guerilla Mode)
-    p_res = supabase.table("card_prices").select("card_id, price_low, recorded_at, language").order("recorded_at", desc=True).execute()
+    # Carica prezzi (Tutti i record per calcolare i movers e mostrare il grafico)
+    p_res = supabase.table("card_prices").select("*").order("recorded_at", desc=False).execute()
     df_p = pd.DataFrame(p_res.data)
     if not df_p.empty:
         df_p['recorded_at'] = pd.to_datetime(df_p['recorded_at'])
-    
+        # Creiamo una data semplificata (senza ore/secondi) per raggruppare i giorni nel grafico
+        df_p['date'] = df_p['recorded_at'].dt.strftime('%Y-%m-%d')
     return df_c, df_p
 
-# --- LOGICA MARKET MOVERS ---
-def calculate_movers(df_prices, df_cards):
-    if df_prices.empty: return pd.DataFrame(), pd.DataFrame()
-    
-    # Prendiamo solo mercato EN per i trend globali
-    df_en = df_prices[df_prices['language'] == 'EN'].copy()
-    
-    # Per ogni carta, prendiamo l'ultimo e il penultimo prezzo
-    movers = []
-    for cid in df_en['card_id'].unique():
-        card_history = df_en[df_en['card_id'] == cid].sort_values('recorded_at', ascending=False)
-        if len(card_history) >= 2:
-            current = card_history.iloc[0]['price_low']
-            previous = card_history.iloc[1]['price_low']
-            change = ((float(current) - float(previous)) / float(previous)) * 100
-            
-            name = df_cards[df_cards['card_id'] == cid]['name'].values[0]
-            movers.append({'name': name, 'change': round(change, 2), 'price': current})
-    
-    df_m = pd.DataFrame(movers)
-    if df_m.empty: return pd.DataFrame(), pd.DataFrame()
-    
-    gainers = df_m[df_m['change'] > 0].sort_values('change', ascending=False).head(5)
-    losers = df_m[df_m['change'] < 0].sort_values('change', ascending=True).head(5)
-    return gainers, losers
-
-# --- ESECUZIONE ---
-df_cards, df_all_prices = get_all_data()
-df_gainers, df_losers = calculate_movers(df_all_prices, df_cards)
+df_cards, df_all_prices = load_data()
 
 # --- SIDEBAR ---
-st.sidebar.title("🔍 Mercato Riftbound")
-selected_set = st.sidebar.selectbox("Set:", ["Tutti"] + list(df_cards['set_code'].unique()))
+st.sidebar.title("🔍 Filtri")
+selected_set = st.sidebar.selectbox("Set:", ["Tutti"] + sorted(list(df_cards['set_code'].unique())))
 filtered_cards = df_cards if selected_set == "Tutti" else df_cards[df_cards['set_code'] == selected_set]
 
 selected_display = st.sidebar.selectbox("Cerca Carta:", sorted(filtered_cards['display_name'].unique()))
-selected_langs = st.sidebar.multiselect("Lingue:", ["EN", "CN"], default=["EN", "CN"])
+selected_langs = st.sidebar.multiselect("Mercati:", ["EN", "CN"], default=["EN"])
 
-if st.sidebar.button("🔄 Aggiorna Dati"):
+if st.sidebar.button("🔄 Aggiorna Database"):
     st.cache_data.clear()
     st.rerun()
 
-# --- LAYOUT DASHBOARD ---
-st.title("📊 Riftbound Market Intelligence")
+# --- LOGICA CALCOLO MOVERS (Solo se utili) ---
+def get_top_expensive(df_p, df_c):
+    # Prende l'ultimo prezzo registrato per ogni carta e ordina per valore decrescente
+    latest_prices = df_p.sort_values('recorded_at').groupby(['card_id', 'language']).last().reset_index()
+    top_5 = latest_prices.sort_values('price_low', ascending=False).head(5)
+    return pd.merge(top_5, df_c[['card_id', 'name']], on='card_id')
 
-# --- SEZIONE 1: MARKET OVERVIEW ---
-col_stats1, col_stats2, col_stats3 = st.columns(3)
+# --- LAYOUT PRINCIPALE ---
+card_info = df_cards[df_cards['display_name'] == selected_display].iloc[0]
+card_id = card_info['card_id']
+df_history = df_all_prices[(df_all_prices['card_id'] == card_id) & (df_all_prices['language'].isin(selected_langs))]
 
-with col_stats1:
-    st.subheader("📈 Top Gainers (24h)")
-    if not df_gainers.empty:
-        for _, r in df_gainers.iterrows():
-            st.write(f"**{r['name']}** : green[+{r['change']}%] ({r['price']}€)")
-    else: st.caption("Nessuna variazione rilevante")
+st.title(f"📊 {selected_display}")
+st.caption(f"Espansione: {card_info['set_code']} | ID: {card_id}")
 
-with col_stats2:
-    st.subheader("📉 Top Losers (24h)")
-    if not df_losers.empty:
-        for _, r in df_losers.iterrows():
-            st.write(f"**{r['name']}** : red[{r['change']}%] ({r['price']}€)")
-    else: st.caption("Nessuna variazione rilevante")
-
-with col_stats3:
-    st.subheader("💎 Most Valuable")
-    # Prende le 3 carte più costose in assoluto dall'ultimo rilvamento
-    top_expensive = df_all_prices.sort_values(['recorded_at', 'price_low'], ascending=[False, False]).drop_duplicates('card_id').head(3)
-    for _, r in top_expensive.iterrows():
-        name = df_cards[df_cards['card_id'] == r['card_id']]['name'].values[0]
-        st.write(f"**{name}**: {r['price_low']}€")
+# --- METRICHE IN ALTO ---
+if not df_history.empty:
+    m1, m2, m3 = st.columns(3)
+    last_p = df_history.iloc[-1]['price_low']
+    first_p = df_history.iloc[0]['price_low']
+    diff = float(last_p) - float(first_p)
+    
+    m1.metric("Prezzo Attuale", f"{last_p} €")
+    m2.metric("Variazione Totale", f"{round(diff, 2)} €", delta=f"{round(diff, 2)} €")
+    m3.metric("Rarità", card_info['rarity'])
 
 st.divider()
 
-# --- SEZIONE 2: DETTAGLIO CARTA ---
-card_info = df_cards[df_cards['display_name'] == selected_display].iloc[0]
-card_id = card_info['card_id']
-
+# --- GRAFICO E IMMAGINE ---
 col_img, col_chart = st.columns([1, 2.5])
 
 with col_img:
-    st.image(card_info['image_url'], use_container_width=True)
-    st.subheader("📝 Specifiche")
-    st.markdown(f"""
-    - **ID:** `{card_id}`
-    - **Rarità:** {card_info['rarity']}
-    - **Set:** {card_info['set_code']}
-    """)
-    if card_info['ability']:
-        st.info(f"**Abilità:**\n\n{card_info['ability']}")
+    st.image(card_info['image_url'], width='stretch')
+    with st.expander("📝 Descrizione Abilità"):
+        st.write(card_info['ability'] if card_info['ability'] else "Nessun testo abilità presente.")
 
 with col_chart:
-    st.subheader(f"📈 Storico Prezzi: {selected_display}")
-    
-    # Filtriamo i prezzi per questa carta specifica
-    df_history = df_all_prices[df_all_prices['card_id'] == card_id]
-    
     if not df_history.empty:
-        plot_df = df_history[df_history['language'].isin(selected_langs)].sort_values('recorded_at')
-        
-        # Grafico
+        # GRAFICO OTTIMIZZATO
         fig = px.line(
-            plot_df, x="recorded_at", y="price_low", color="language",
-            markers=True, template="plotly_dark",
-            color_discrete_map={"EN": "#00CC96", "CN": "#EF553B"},
-            labels={"recorded_at": "Data", "price_low": "Prezzo (€)"}
+            df_history, 
+            x="recorded_at", 
+            y="price_low", 
+            color="language",
+            markers=True,
+            title="Andamento Storico (Prezzo Minimo)",
+            template="plotly_dark",
+            color_discrete_map={"EN": "#00CC96", "CN": "#EF553B"}
         )
-        fig.update_layout(hovermode="x unified", xaxis_title=None)
+        
+        # Forza il grafico a mostrare i giorni in modo lineare
+        fig.update_layout(
+            hovermode="x unified",
+            xaxis_title=None,
+            yaxis_title="Euro (€)",
+            margin=dict(l=0, r=0, t=40, b=0)
+        )
         st.plotly_chart(fig, use_container_width=True)
-
-        # Metrica veloce
-        if len(plot_df) > 1:
-            last_p = plot_df.iloc[-1]['price_low']
-            prev_p = plot_df.iloc[-2]['price_low']
-            st.metric("Ultimo Prezzo", f"{last_p} €", f"{round(float(last_p)-float(prev_p), 2)} €")
-
-        with st.expander("📄 Dati Grezzi"):
-            st.dataframe(plot_df.sort_values('recorded_at', ascending=False), use_container_width=True, hide_index=True)
     else:
-        st.warning("Dati non ancora disponibili per questa carta.")
+        st.info("Nessun dato storico per questa carta.")
 
+# --- TABELLA RIEPILOGATIVA ---
+st.subheader("📋 Storico Rilevazioni")
+if not df_history.empty:
+    st.dataframe(
+        df_history.sort_values('recorded_at', ascending=False)[['recorded_at', 'language', 'price_low']],
+        use_container_width=True,
+        hide_index=True
+    )
+
+# --- SEZIONE CARTE PIÙ COSTOSE (CORRETTA) ---
 st.divider()
-st.caption("Riftbound Borsa v3.0 | Dati aggiornati automaticamente tramite GitHub Actions.")
+st.subheader("💎 Carte più preziose del set (Mercato EN)")
+df_top = get_top_expensive(df_all_prices[df_all_prices['language']=='EN'], df_cards)
+cols = st.columns(5)
+for i, (_, row) in enumerate(df_top.iterrows()):
+    cols[i].metric(row['name'], f"{row['price_low']} €")
