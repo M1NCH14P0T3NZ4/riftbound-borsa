@@ -5,10 +5,10 @@ from supabase import create_client
 import re
 import time
 
-# --- CONFIGURAZIONE ---
+# --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="Riftbound Intelligence", page_icon="📈", layout="wide")
-st.markdown("""<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;}</style>""", unsafe_allow_html=True)
 
+# --- CONNESSIONE ---
 try:
     URL = st.secrets["SUPABASE_URL"]
     KEY = st.secrets["SUPABASE_KEY"]
@@ -25,12 +25,12 @@ def login_user(e, p):
         res = supabase.auth.sign_in_with_password({"email": e, "password": p})
         st.session_state.user = res.user
         st.rerun()
-    except: st.error("Login fallito.")
+    except: st.error("Credenziali errate.")
 
 def signup_user(e, p):
     try:
         supabase.auth.sign_up({"email": e, "password": p})
-        st.info("Registrazione inviata! Conferma la mail se necessario.")
+        st.info("Registrazione inviata! Conferma la mail (se richiesto) e accedi.")
     except Exception as ex: st.error(f"Errore: {ex}")
 
 # --- LOGIN WALL ---
@@ -53,6 +53,9 @@ def get_base_data():
     c_res = supabase.table("cards").select("*").execute()
     df_c = pd.DataFrame(c_res.data)
     df_c['display_name'] = df_c.apply(lambda r: f"{r['name']} (✨ Showcase)" if r.get('is_showcase') else r['name'], axis=1)
+    # Pulizia nomi per ricerca facilitata nel bulk import
+    df_c['name_clean'] = df_c['name'].str.lower().str.replace(r'[^a-z0-9]', '', regex=True)
+    
     p_res = supabase.table("card_prices").select("*").eq("language", "EN").order("recorded_at", desc=True).limit(2000).execute()
     df_p = pd.DataFrame(p_res.data)
     if not df_p.empty: df_p['recorded_at'] = pd.to_datetime(df_p['recorded_at'])
@@ -76,10 +79,10 @@ with st.sidebar:
     st.divider()
     sel_set = st.selectbox("Set:", ["Tutti"] + sorted(list(df_cards['set_code'].unique())))
     f_cards = df_cards if sel_set == "Tutti" else df_cards[df_cards['set_code'] == sel_set]
-    sel_card = st.selectbox("Cerca Carta:", sorted(f_cards['display_name'].unique()))
+    sel_card_display = st.selectbox("Cerca Carta:", sorted(f_cards['display_name'].unique()))
     sel_lang = st.radio("Mercato:", ["EN", "CN"])
 
-c_info = df_cards[df_cards['display_name'] == sel_card].iloc[0]
+c_info = df_cards[df_cards['display_name'] == sel_card_display].iloc[0]
 c_id = c_info['card_id']
 
 # --- DASHBOARD ---
@@ -102,11 +105,11 @@ with t1:
         if not df_l.empty:
             temp = df_l[['recorded_at', 'price_low', 'price_trend']].copy()
             mlt = temp.melt(id_vars=['recorded_at'], value_vars=['price_low', 'price_trend'], var_name='Metric', value_name='Euro')
+            mlt['Metric'] = mlt['Metric'].map({'price_low': 'Prezzo', 'price_trend': 'Trend (7g)'})
             fig = px.line(mlt, x="recorded_at", y="Euro", color="Metric", markers=True, template="plotly_dark",
-                         color_discrete_map={'price_low': "#00CC96", 'price_trend': "#FFA15A"})
+                         color_discrete_map={'Prezzo': "#00CC96", 'Trend (7g)': "#FFA15A"})
             fig.update_layout(hovermode="x unified", xaxis_title=None, margin=dict(t=0))
             st.plotly_chart(fig, width='stretch')
-            st.metric("Valore Attuale", f"{lp} €", f"{round(lp - lt, 2)} € vs Media")
 
 with t2:
     if not df_market.empty:
@@ -117,47 +120,52 @@ with t2:
 with t3:
     st.header("🎒 Gestione Raccoglitore")
     
-    # 1. IMPORTAZIONE MASSIVA MIGLIORATA
+    # 1. IMPORTAZIONE MASSIVA (FIXATA)
     with st.expander("📥 Importazione Rapida (Copia-Incolla nomi)"):
-        st.write("Incolla un elenco di nomi (uno per riga). Esempio: Darius, Trifarian")
-        txt_in = st.text_area("Elenco carte:", height=150, key="bulk_import_area")
+        st.write("Incolla un elenco di nomi (uno per riga).")
+        txt_in = st.text_area("Elenco carte:", height=150, placeholder="Darius, Trifarian\nAcceptable Losses...")
         if st.button("Esegui Importazione"):
             lines = [l.strip() for l in txt_in.split("\n") if l.strip()]
-            success, error = 0, 0
+            success, error_list = 0, []
             for name in lines:
-                # Cerchiamo la carta nel DB (versione non showcase)
-                match = df_cards[(df_cards['name'].str.lower() == name.lower()) & (df_cards['is_showcase'] == False)]
+                # Pulizia nome per ricerca flessibile
+                clean_search = re.sub(r'[^a-z0-9]', '', name.lower())
+                match = df_cards[(df_cards['name_clean'] == clean_search) & (df_cards['is_showcase'] == False)]
+                
                 if not match.empty:
                     tid = match.iloc[0]['card_id']
                     try:
-                        # Upsert con specifica del conflitto
-                        supabase.table("user_collections").upsert({
-                            "user_id": st.session_state.user.id,
-                            "card_id": tid,
-                            "quantity": 1
-                        }, on_conflict="user_id,card_id").execute()
+                        supabase.table("user_collections").upsert(
+                            {"user_id": st.session_state.user.id, "card_id": tid, "quantity": 1},
+                            on_conflict="user_id,card_id"
+                        ).execute()
                         success += 1
-                    except: error += 1
-                else: error += 1
-            st.success(f"Importazione completata! Successi: {success}, Falliti/Non trovati: {error}")
+                    except Exception as e:
+                        error_list.append(f"{name} (Errore DB)")
+                else:
+                    error_list.append(f"{name} (Non trovata)")
+            
+            if success > 0: st.success(f"Aggiunte {success} carte!")
+            if error_list: st.error(f"Problemi con: {', '.join(error_list)}")
             time.sleep(1)
             st.rerun()
 
-    # 2. MODIFICA SINGOLA
-    st.subheader(f"Aggiungi/Modifica: {sel_card}")
+    # 2. MODIFICA SINGOLA (FIXATA)
+    st.subheader(f"Modifica: {sel_card_display}")
     col_q, col_p = st.columns(2)
     with col_q: q = st.number_input("Quantità", min_value=0, step=1)
     with col_p: bp = st.number_input("Prezzo d'acquisto unitario (€)", min_value=0.0)
     
     if st.button("💾 Salva nel Portfolio"):
         try:
+            # Specifichiamo on_conflict per evitare l'errore RLS/Unique
             supabase.table("user_collections").upsert({
                 "user_id": st.session_state.user.id, 
                 "card_id": c_id, 
-                "quantity": q, 
-                "purchase_price": bp
+                "quantity": int(q), 
+                "purchase_price": float(bp)
             }, on_conflict="user_id,card_id").execute()
-            st.success("Salvato!")
+            st.success("Portfolio aggiornato!")
             time.sleep(1)
             st.rerun()
         except Exception as e:
@@ -165,12 +173,14 @@ with t3:
 
     # 3. VISUALIZZAZIONE
     st.divider()
-    st.subheader("🖼️ Il tuo Portfolio")
-    my_data = supabase.table("user_collections").select("quantity, purchase_price, cards(name, rarity)").eq("user_id", st.session_state.user.id).execute().data
+    my_data = supabase.table("user_collections").select("quantity, purchase_price, cards(name, rarity, is_showcase)").eq("user_id", st.session_state.user.id).execute().data
     if my_data:
         df_my = pd.DataFrame(my_data)
-        df_my['Nome'] = df_my['cards'].apply(lambda x: x['name'] if x else 'N/A')
+        df_my['Nome'] = df_my['cards'].apply(lambda x: f"{x['name']} (✨)" if x and x['is_showcase'] else (x['name'] if x else 'N/A'))
         df_my['Rarità'] = df_my['cards'].apply(lambda x: x['rarity'] if x else 'N/A')
+        st.subheader("🖼️ La tua collezione")
         st.dataframe(df_my[['Nome', 'Rarità', 'quantity', 'purchase_price']], width='stretch', hide_index=True)
     else:
         st.info("Portfolio vuoto.")
+
+st.caption("Riftbound Borsa v6.2 | Sistema protetto e privato")
